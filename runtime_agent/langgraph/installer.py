@@ -454,7 +454,7 @@ def _upsert_managed_policy(
 # Runtime tools only touch CF-shared prefixes (upload/read artifacts, images, docs).
 # App data (tasks.db, litellm, graph, settings) lives under app-data/ on a
 # separate S3 Files FS that Runtime must never mount or read via S3 API.
-RUNTIME_S3_OBJECT_PREFIXES = ("artifacts/", "images/", "docs/")
+RUNTIME_S3_OBJECT_PREFIXES = ("artifacts/", "*/artifacts/", "images/", "docs/")
 
 # S3 API Deny even if Allow is later widened.
 # - app-data/: ECS tasks.db / litellm / graph / settings (separate FS; never grant)
