@@ -4375,32 +4375,6 @@ def create_vector_index_in_opensearch(collection_endpoint: str, index_name: str)
         )
 
         url = f"{collection_endpoint}/{index_name}"
-        for attempt in range(6):
-            response = requests.get(url, auth=awsauth, timeout=30)
-            if response.status_code == 200:
-                logger.debug(f"Vector index '{index_name}' already exists")
-                return True
-            if response.status_code in (401, 403) and attempt < 5:
-                wait_seconds = 10 * (attempt + 1)
-                logger.info(
-                    f"  OpenSearch returned {response.status_code}; "
-                    f"waiting {wait_seconds}s for data access policy propagation "
-                    f"(attempt {attempt + 1}/5)..."
-                )
-                time.sleep(wait_seconds)
-                continue
-            if response.status_code == 401:
-                logger.error(
-                    "  Unauthorized (401) accessing OpenSearch. "
-                    f"Ensure {_get_installer_iam_arn()} (and any IAM Identity Center "
-                    "console roles) are in the collection data access policy."
-                )
-                return False
-            if response.status_code == 403:
-                logger.error(f"  Forbidden (403) accessing OpenSearch index '{index_name}'")
-                return False
-            break
-
         index_mapping = {
             "settings": {
                 "index": {
@@ -4428,25 +4402,60 @@ def create_vector_index_in_opensearch(collection_endpoint: str, index_name: str)
                 }
             },
         }
-
         headers = {"Content-Type": "application/json"}
-        response = requests.put(
-            url,
-            auth=awsauth,
-            headers=headers,
-            data=json.dumps(index_mapping),
-            timeout=30,
-        )
 
-        if response.status_code in [200, 201]:
-            logger.info(f"  ✓ Vector index '{index_name}' created successfully")
-            logger.info("  Waiting for index to be ready...")
-            time.sleep(30)
-            return True
+        # A missing index returns 404 even while the data access policy is still
+        # propagating, so a single PUT can 403. Retry that PUT in the same loop.
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            response = requests.get(url, auth=awsauth, timeout=30)
+            if response.status_code == 200:
+                logger.debug(f"Vector index '{index_name}' already exists")
+                return True
 
-        logger.error(
-            f"  Failed to create vector index: {response.status_code} - {response.text}"
-        )
+            if response.status_code == 404:
+                response = requests.put(
+                    url,
+                    auth=awsauth,
+                    headers=headers,
+                    data=json.dumps(index_mapping),
+                    timeout=30,
+                )
+                if response.status_code in (200, 201):
+                    logger.info(f"  ✓ Vector index '{index_name}' created successfully")
+                    logger.info("  Waiting for index to be ready...")
+                    time.sleep(30)
+                    return True
+
+            if response.status_code in (401, 403) and attempt < max_attempts - 1:
+                wait_seconds = 10 * (attempt + 1)
+                logger.info(
+                    f"  OpenSearch returned {response.status_code}; "
+                    f"waiting {wait_seconds}s for data access policy propagation "
+                    f"(attempt {attempt + 1}/{max_attempts - 1})..."
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            if response.status_code == 401:
+                logger.error(
+                    "  Unauthorized (401) accessing OpenSearch. "
+                    f"Ensure {_get_installer_iam_arn()} (and any IAM Identity Center "
+                    "console roles) are in the collection data access policy."
+                )
+                return False
+            if response.status_code == 403:
+                logger.error(
+                    f"  Forbidden (403) accessing OpenSearch index '{index_name}': "
+                    f"{response.text}"
+                )
+                return False
+
+            logger.error(
+                f"  Failed to create vector index: {response.status_code} - {response.text}"
+            )
+            return False
+
         return False
 
     except ImportError:

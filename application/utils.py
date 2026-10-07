@@ -2,6 +2,7 @@ import logging
 import sys
 import json
 import traceback
+import unicodedata
 import boto3
 import os
 from contextlib import contextmanager
@@ -15,6 +16,24 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("utils")
+
+
+def nfc_text(value: str | None) -> str:
+    """Compose Hangul so an NFD upload and an NFC lookup share one spelling."""
+    return unicodedata.normalize("NFC", value or "")
+
+
+def nfc_filename(filename: str | None, *, default: str = "") -> str:
+    """Return a basename in NFC.
+
+    macOS file pickers send decomposed Hangul (NFD). Linux paths and the
+    agent look up composed Hangul (NFC), so store and address one spelling.
+    """
+    name = nfc_text(os.path.basename(filename or "").strip())
+    name = name.replace("\x00", "")
+    if name in {".", ".."}:
+        return default
+    return name or default
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
@@ -489,7 +508,7 @@ def _wiki_raw_dest_path(raw_dir: "Path", filename: str) -> "Path":
     from pathlib import Path
 
     raw_dir = Path(raw_dir)
-    name = Path(str(filename or "").strip() or "upload.bin").name
+    name = nfc_filename(filename, default="upload.bin")
     # Block path traversal in uploaded names.
     name = name.replace("\x00", "").replace("/", "_").replace("\\", "_")
     if not name or name in (".", ".."):
@@ -565,10 +584,10 @@ def save_wiki_raw_from_s3(
     """
     from pathlib import Path
 
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     expected_key = wiki_raw_upload_s3_key(safe_name, user_id=user_id)
     key = (s3_key or "").strip()
-    if key != expected_key:
+    if nfc_text(key) != nfc_text(expected_key):
         raise ValueError("Invalid upload target")
 
     head = head_session_upload_object(key)
@@ -1401,6 +1420,8 @@ def upload_to_s3(
         logger.error("s3_bucket is not configured")
         return None
 
+    file_name = nfc_filename(file_name, default="upload.bin")
+
     try:
         s3_client = boto3.client(service_name="s3", region_name=bedrock_region)
         content_type = get_contents_type(file_name)
@@ -1451,7 +1472,7 @@ def upload_to_s3(
 
 def rag_docs_s3_key(file_name: str, user_id: str | None = None) -> str:
     """Build ``docs/{user}/{file}`` key used by Knowledge Base ingest."""
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     user_segment = _sanitize_s3_user_segment(user_id)
     if user_segment:
         return f"{s3_prefix}/{user_segment}/{safe_name}"
@@ -1462,7 +1483,7 @@ def rag_docs_public_url(file_name: str, user_id: str | None = None) -> str | Non
     """CloudFront/sharing URL for a docs/ object, if configured."""
     if not sharing_url:
         return None
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     user_segment = _sanitize_s3_user_segment(user_id)
     if user_segment:
         relative = f"{s3_prefix}/{parse.quote(user_segment)}/{parse.quote(safe_name)}"
@@ -1486,7 +1507,7 @@ def generate_rag_upload_presigned_put(
         logger.error("s3_bucket is not configured")
         return None
 
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     s3_key = rag_docs_s3_key(safe_name, user_id=user_id)
     content_type = _session_upload_content_type(safe_name)
     headers = {"Content-Type": content_type}
@@ -1552,7 +1573,7 @@ def _s3_client_for_presign():
 def session_upload_s3_key(file_name: str, user_id: str | None = None) -> str:
     """Build ``agentcore-sessions/{user}/upload/{file}`` object key."""
     segment = _sanitize_s3_user_segment(user_id) or "default"
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     return session_object_key(segment, "upload", safe_name)
 
 
@@ -1579,7 +1600,7 @@ def upload_to_session_upload(
         logger.error("s3_bucket is not configured")
         return None
 
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     s3_key = session_upload_s3_key(safe_name, user_id=user_id)
     content_type = _session_upload_content_type(safe_name)
 
@@ -1631,7 +1652,7 @@ def generate_session_upload_presigned_put(
         logger.error("s3_bucket is not configured")
         return None
 
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     s3_key = session_upload_s3_key(safe_name, user_id=user_id)
     content_type = _session_upload_content_type(safe_name)
     headers = {"Content-Type": content_type}
@@ -1677,7 +1698,7 @@ def wiki_raw_upload_s3_key(file_name: str, user_id: str | None = None) -> str:
     ``{user}/wiki/raw/`` for Sync. Separate from the post-sync ``wiki/`` mirror.
     """
     segment = _sanitize_s3_user_segment(user_id) or "default"
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     return session_object_key(segment, "wiki-upload", safe_name)
 
 
@@ -1692,7 +1713,7 @@ def generate_wiki_raw_presigned_put(
         logger.error("s3_bucket is not configured")
         return None
 
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = nfc_filename(file_name, default="upload.bin")
     s3_key = wiki_raw_upload_s3_key(safe_name, user_id=user_id)
     content_type = _session_upload_content_type(safe_name)
     headers = {"Content-Type": content_type}

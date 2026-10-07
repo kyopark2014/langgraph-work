@@ -1,6 +1,16 @@
 import type { AppConfig, Message, StreamEvent, Task, TaskRun } from "./types";
 import { uiError, uiLog } from "./debug";
 
+/** macOS file pickers yield NFD Hangul. Uploads store and address NFC. */
+function fileWithNfcName(file: File): File {
+  const name = file.name.normalize("NFC");
+  if (!name || name === file.name) return file;
+  return new File([file], name, {
+    type: file.type,
+    lastModified: file.lastModified,
+  });
+}
+
 export interface RagUploadResult {
   ok: boolean;
   file_name: string;
@@ -221,7 +231,8 @@ export const api = {
     let wikiDir = "";
     let rawDir = "";
 
-    for (const file of files) {
+    for (const raw of files) {
+      const file = fileWithNfcName(raw);
       const presign = await request<WikiRawPresignResult>("/api/wiki/raw/presign", {
         method: "POST",
         body: JSON.stringify({
@@ -367,6 +378,7 @@ export const api = {
     options?: { sync?: boolean },
   ): Promise<RagUploadResult> => {
     // Presigned PUT: browser → S3 directly (avoids ECS/ALB ~80MB body limits).
+    file = fileWithNfcName(file);
     const sync = options?.sync !== false;
     uiLog("rag:upload start", { name: file.name, size: file.size, sync });
 
@@ -444,6 +456,7 @@ export const api = {
     return data;
   },
   uploadFile: async (file: File): Promise<FileUploadResult> => {
+    file = fileWithNfcName(file);
     uiLog("file:upload start", { name: file.name, size: file.size, type: file.type });
     const form = new FormData();
     form.append("file", file);
@@ -465,6 +478,7 @@ export const api = {
     return data;
   },
   loadFile: async (file: File): Promise<LoadFileResult> => {
+    file = fileWithNfcName(file);
     // Presigned PUT: browser → S3 directly (avoids ECS/ALB ~80MB body limits).
     uiLog("file:load start", { name: file.name, size: file.size, type: file.type });
 
