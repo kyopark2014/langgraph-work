@@ -27,6 +27,8 @@ def runtime_build_context() -> str:
 
 def load_config():
     """Load config.json file and merge S3 Files settings from application config."""
+    # Always pin projectName to root installer.py to avoid cross-project contamination.
+    expected_project_name = get_knowledge_base_name()
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
@@ -34,7 +36,7 @@ def load_config():
         print(f"Failed to parse config.json file: {e}")
         config = {}
         config["region"] = boto3.Session().region_name or "us-west-2"
-        config["projectName"] = "langgraph-runtime"
+        config["projectName"] = expected_project_name
 
         sts = boto3.client("sts")
         response = sts.get_caller_identity()
@@ -44,8 +46,18 @@ def load_config():
             json.dump(config, f, indent=2)
         return _merge_application_config(config)
 
+    changed = False
     if not config.get("region"):
         config["region"] = boto3.Session().region_name or "us-west-2"
+        changed = True
+    if config.get("projectName") != expected_project_name:
+        print(
+            f"  Correcting projectName: {config.get('projectName')!r} -> "
+            f"{expected_project_name!r}"
+        )
+        config["projectName"] = expected_project_name
+        changed = True
+    if changed:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
 
@@ -1515,9 +1527,8 @@ def push_to_ecr():
         current_folder_name = os.path.basename(script_dir)
         print(f"BUILD_CONTEXT: {build_context}")
         print(f"CURRENT_FOLDER_NAME: {current_folder_name}")
-        
-        # Construct ECR repository name
-        ecr_repository = f"{project_name}_{current_folder_name}"
+
+        ecr_repository = runtime_ecr_repository_name(config)
         print(f"ECR_REPOSITORY: {ecr_repository}")
         
         # Construct image tag and ECR URI
@@ -1590,6 +1601,21 @@ def push_to_ecr():
 # ============================================================================
 
 
+def runtime_ecr_repository_name(config: dict | None = None) -> str:
+    """ECR repo for this runtime image: {projectName}_{runtime_folder}.
+
+    Always derive the folder from ``script_dir`` (``.../runtime_agent/langgraph``),
+    never ``os.getcwd()`` — root installer runs this script with cwd=repo root.
+    """
+    cfg = config or {}
+    configured = (cfg.get("ecr_repository") or "").strip()
+    if configured:
+        return configured
+    project_name = cfg.get("projectName") or get_knowledge_base_name()
+    runtime_folder = os.path.basename(script_dir)
+    return f"{project_name}_{runtime_folder}"
+
+
 def get_latest_image_tag(config):
     """Return the image tag to deploy for AgentCore.
 
@@ -1604,9 +1630,7 @@ def get_latest_image_tag(config):
 
     try:
         aws_region = config['region']
-        project_name = config.get('projectName')
-        current_folder_name = os.path.basename(os.getcwd())
-        repository_name = f"{project_name}_{current_folder_name}"
+        repository_name = runtime_ecr_repository_name(config)
 
         ecr_client = boto3.client('ecr', region_name=aws_region)
         images: list = []
@@ -1975,12 +1999,10 @@ def create_agent_runtime():
         config = load_config()
         aws_region = config['region']
         project_name = config.get('projectName')
-        
-        # Get current folder name
-        current_folder_name = os.path.basename(os.getcwd())
-        repository_name = f"{project_name}_{current_folder_name}"
+
+        repository_name = runtime_ecr_repository_name(config)
         runtime_name = agent_runtime_name(project_name)
-        
+
         print(f"Repository name: {repository_name}")
         print(f"Runtime name: {runtime_name}")
         

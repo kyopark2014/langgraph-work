@@ -84,10 +84,18 @@ memory_enabled = False
 memory_id = None
 actor_id = None
 session_id = None
+notion_access_token: str | None = None
 
-def update(userId, modelName, debugMode, guardrailEnabled=None, memoryEnabled=None):    
+def update(
+    userId,
+    modelName,
+    debugMode,
+    guardrailEnabled=None,
+    memoryEnabled=None,
+    notionAccessToken=None,
+):    
     global model_name, model_id, model_type, debug_mode, reasoning_mode
-    global models, user_id, guardrail_enabled, memory_enabled
+    global models, user_id, guardrail_enabled, memory_enabled, notion_access_token
 
     if userId != user_id:
         user_id = userId
@@ -115,6 +123,13 @@ def update(userId, modelName, debugMode, guardrailEnabled=None, memoryEnabled=No
     if memoryEnabled is not None and memory_enabled != memoryEnabled:
         memory_enabled = memoryEnabled
         logger.info(f"memory_enabled: {memory_enabled}")
+
+    if notionAccessToken is not None:
+        notion_access_token = (notionAccessToken or "").strip() or None
+        if notion_access_token:
+            os.environ["NOTION_REMOTE_ACCESS_TOKEN"] = notion_access_token
+        else:
+            os.environ.pop("NOTION_REMOTE_ACCESS_TOKEN", None)
 
 def _guardrail_config() -> dict | None:
     if not guardrail_enabled:
@@ -2191,6 +2206,14 @@ def append_tool_guidance_to_prompt(system_prompt: str, mcp_servers: list) -> str
             "aws와 관련된 내용이 있다면, search_documentation tool을 이용해 필요한 정보를 수집하세요."
         )
 
+    if selected & {"notion-remote", "notion remote", "notion_remote"}:
+        extras.append(
+            "Notion 작업은 notion-remote MCP 도구를 사용하세요. "
+            "notion-search / notion-fetch / notion-list-*-pages 결과는 채팅에 목록·페이지 UI로 "
+            "표시되므로, 같은 내용을 텍스트로 길게 반복하지 말고 핵심만 요약하세요. "
+            "검색어 입력이나 수정 요청은 사용자의 채팅 메시지로 받습니다."
+        )
+
     if not extras:
         return system_prompt
 
@@ -2243,6 +2266,21 @@ async def create_agent(
             params["env"] = env
             logger.info(f"{server_name} MCP AGENTCORE_USER_ID={scoped_user_id}")
 
+    # Notion hosted MCP requires the signed-in user's OAuth access token.
+    notion_token = (
+        notion_access_token or os.environ.get("NOTION_REMOTE_ACCESS_TOKEN") or ""
+    ).strip()
+    if "notion-remote" in server_params and not notion_token:
+        logger.warning(
+            "notion-remote MCP skipped: notion_access_token missing "
+            "(connect Notion in the web UI)"
+        )
+        server_params.pop("notion-remote", None)
+
+    import mcp_apps_host
+
+    mcp_apps_host.clear()
+
     has_agentcore = any(
         cfg.get("auth_type") == "aws_sigv4"
         for cfg in (mcp_json.get("mcpServers") or {}).values()
@@ -2264,6 +2302,21 @@ async def create_agent(
                         async with MCPAdapter({"mcpServers": {server_name: params}}) as adapter:
                             logger.info(f"MCP client initialized for server: {server_name}")
                             server_tools = await adapter.list_tools()
+                            # MCP Apps: remember ui:// resources the server's tools declare.
+                            try:
+                                n_apps = await mcp_apps_host.cache_apps_from_adapter(
+                                    adapter,
+                                    server_tools,
+                                    fallback_server_name=server_name,
+                                )
+                                if n_apps:
+                                    logger.info(
+                                        f"Cached {n_apps} MCP App UI resource(s) from {server_name}"
+                                    )
+                            except Exception as app_exc:
+                                logger.warning(
+                                    f"MCP Apps cache skipped for {server_name}: {app_exc}"
+                                )
                         loaded = True
                         break
                     except Exception as e:
@@ -2283,6 +2336,15 @@ async def create_agent(
                 if not loaded:
                     continue
 
+                hidden = [
+                    t.name
+                    for t in server_tools
+                    if mcp_apps_host.is_app_only_tool(getattr(t, "metadata", None))
+                ]
+                if hidden:
+                    logger.info(f"app-only tools hidden from the model ({server_name}): {hidden}")
+                    server_tools = [t for t in server_tools if t.name not in hidden]
+
                 for tool in wrap_tavily_mcp_tools(server_tools):
                     logger.info(f"mcp_tool: {tool.name} (from {server_name})")
                     if tool.name not in [t.name for t in tools]:
@@ -2295,6 +2357,15 @@ async def create_agent(
             if getattr(e, "__cause__", None):
                 logger.error(f"  cause: {e.__cause__}")
             logger.info(f"Falling back to builtin tools only (count: {len(tools)})")
+
+    if "notion-remote" in server_params:
+        try:
+            import notion_app
+
+            n_notion_apps = notion_app.register_notion_apps()
+            logger.info(f"Registered {n_notion_apps} Notion viewer app(s)")
+        except Exception as notion_app_exc:
+            logger.warning(f"Notion viewer apps skipped: {notion_app_exc}")
 
     if "aws-tavily" in mcp_servers and not any(
         getattr(t, "name", "").startswith("tavily_") for t in tools
@@ -2354,6 +2425,12 @@ mcp_tool_servers: dict[str, str] = {}
 active_skills = []
 current_id = None
 _active_agent_session = None
+_active_notion_authed = False
+
+
+def _notion_mcp_requested(mcp_servers: list) -> bool:
+    names = {str(s).strip().lower() for s in (mcp_servers or []) if str(s).strip()}
+    return bool(names & {"notion-remote", "notion remote", "notion_remote"})
 
 
 async def get_or_create_agent(
@@ -2375,8 +2452,13 @@ async def get_or_create_agent(
     when nothing relevant changed.
     """
     global app, agent_config, active_mcp_servers, active_skills, current_id, _active_agent_session
+    global _active_notion_authed
 
     session_id = runtime_session_id or _checkpoint_session_id()
+    notion_authed = bool(
+        (notion_access_token or os.environ.get("NOTION_REMOTE_ACCESS_TOKEN") or "").strip()
+    )
+    notion_needed = _notion_mcp_requested(mcp_servers)
 
     if (
         app is not None
@@ -2384,6 +2466,7 @@ async def get_or_create_agent(
         and active_skills == skill_list
         and current_id == user_id
         and _active_agent_session == session_id
+        and (not notion_needed or _active_notion_authed == notion_authed)
     ):
         logger.info(
             f"Reusing cached agent/MCP tools (session={session_id}, "
@@ -2399,6 +2482,7 @@ async def get_or_create_agent(
     active_skills = skill_list
     current_id = user_id
     _active_agent_session = session_id
+    _active_notion_authed = notion_authed if notion_needed else False
 
     app, agent_config = await create_agent(mcp_servers, skill_list, runtime_session_id)
     return app, agent_config

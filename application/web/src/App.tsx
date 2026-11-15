@@ -811,6 +811,7 @@ export default function App() {
         onPatchTask={handlePatchTask}
         onDeleteTask={handleDeleteTask}
         onLogout={handleLogout}
+        onRefreshConfig={refreshConfig}
         knowledgeGraphEnabled={knowledgeGraphEnabled}
         onPatchKnowledgeGraphEnabled={async (enabled) => {
           setKnowledgeGraphEnabled(enabled);

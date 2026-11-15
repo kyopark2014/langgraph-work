@@ -1592,6 +1592,10 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                         region=config.get("auth_region", "us-west-2"),
                         service=config.get("auth_service", "bedrock-agentcore"),
                     )
+                elif config.get("auth_type") == "notion_bearer":
+                    import notion_bearer_auth
+
+                    connection["auth"] = notion_bearer_auth.NotionBearerAuth()
                 server_info[server_name] = connection
             else:
                 command = config.get("command", "")

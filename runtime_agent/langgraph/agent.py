@@ -143,7 +143,13 @@ async def agent_langgraph(payload):
     """
     Invoke the agent with a payload
     """
-    logger.info(f"payload: {payload}")
+    try:
+        _payload_log = dict(payload) if isinstance(payload, dict) else {}
+        if _payload_log.get("notion_access_token"):
+            _payload_log["notion_access_token"] = "***"
+        logger.info(f"payload: {_payload_log}")
+    except Exception:
+        logger.info("payload: (received)")
     query = payload.get("prompt")
     logger.info(f"query: {query}")
 
@@ -171,6 +177,7 @@ async def agent_langgraph(payload):
         debugMode=payload.get("debug_mode", chat.debug_mode),
         guardrailEnabled=payload.get("guardrail_enabled"),
         memoryEnabled=payload.get("memory_enabled"),
+        notionAccessToken=payload.get("notion_access_token"),
     )
 
     logger.info(f"guardrail_enabled: {chat.guardrail_enabled}")
@@ -568,21 +575,42 @@ async def agent_langgraph(payload):
                 tool_used = True
                 tool_use_id = chunk.tool_call_id or ""
                 tool_name = chunk.name or tool_name_by_id.get(tool_use_id, "")
+                app_tool_input = None
                 if tool_use_id and tool_name:
                     args_obj = resolved_tool_args(tool_use_id)
                     if not args_obj:
                         args_obj = await args_from_graph_state(tool_use_id)
+                    app_tool_input = args_obj if isinstance(args_obj, dict) else None
                     payload = yield_tool_args(tool_use_id, tool_name, args_obj)
                     if payload:
                         yield payload
+
+                # MCP Apps: attach the ui:// reference (and tool I/O) when this tool has a UI.
+                import mcp_apps_host
+
+                normalized = mcp_apps_host.normalize_tool_result_text(tool_result_text)
+                artifact = getattr(chunk, "artifact", None)
+                structured = (
+                    artifact.get("structured_content")
+                    if isinstance(artifact, dict)
+                    else None
+                )
+                mcp_app = mcp_apps_host.build_app_payload(
+                    tool_name, normalized, structured, app_tool_input
+                )
                 tool_result_payload = {
-                    "toolResult": utils.truncate_for_stream(tool_result_text),
+                    "toolResult": utils.truncate_for_stream(normalized),
                     "toolUseId": tool_use_id,
                     "tool": tool_name,
                 }
-                mcp_server = chat.mcp_tool_servers.get(tool_name)
+                mcp_server = chat.mcp_tool_servers.get(tool_name) or (
+                    (mcp_app or {}).get("mcpServer")
+                )
                 if mcp_server:
                     tool_result_payload["mcpServer"] = mcp_server
+                if mcp_app:
+                    # Keep the app payload outside the truncated toolResult text.
+                    tool_result_payload["mcpApp"] = mcp_app
                 if tool_name == "get_skill_instructions":
                     skill_name = (tool_args_by_id.get(tool_use_id) or {}).get("skill_name")
                     if isinstance(skill_name, str) and skill_name.strip():
