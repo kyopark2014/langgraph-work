@@ -63,7 +63,11 @@ vector_bucket_name = f"{project_name}-{account_id}"
 ALB_ORIGIN_HEADER_SECRET_NAME = f"{project_name}/cloudfront-alb-origin-header"
 SESSION_SIGNING_KEY_SECRET_NAME = f"{project_name}/session-signing-key"
 SCHEDULE_AGENT_TOKEN_SECRET_NAME = f"{project_name}/schedule-agent-token"
-SCHEDULE_JOBS_TABLE_NAME = f"dynamodb-{project_name}-schedules"
+SCHEDULE_JOBS_TABLE_NAME = f"{project_name}-schedules"
+TASK_STORE_TABLE_NAMES = [
+    f"{project_name}-tasks",
+    f"{project_name}-messages",
+]
 SCHEDULE_LAMBDA_NAME = f"lambda-schedule-for-{project_name}"
 SCHEDULE_LAMBDA_ROLE_NAME = f"role-lambda-schedule-for-{project_name}-{region}"
 SCHEDULER_INVOKE_ROLE_NAME = f"role-scheduler-invoke-for-{project_name}-{region}"
@@ -2218,8 +2222,14 @@ def delete_alb_origin_header_secret() -> None:
 
 
 def delete_cloudfront_signing_key_secret() -> None:
-    """Delete CloudFront signed-cookie RSA key material from Secrets Manager."""
+    """Delete this project's copy of the CloudFront signing secret.
+
+    Shared keys ``ecs-signing-key`` and ``runtime-signing-key`` stay in place.
+    """
     logger.info("Deleting CloudFront signing key secret")
+    logger.info(
+        "  Keeping shared CloudFront keys ecs-signing-key and runtime-signing-key"
+    )
     secret_name = CLOUDFRONT_SIGNING_KEY_SECRET_NAME
     try:
         secretsmanager_client.delete_secret(
@@ -2249,6 +2259,19 @@ def _find_cognito_user_pool_id(pool_name: str):
         if not next_token:
             return None
 
+
+
+def delete_task_store_tables() -> None:
+    """Delete the DynamoDB task-store tables (tasks / messages)."""
+    logger.info("[task-store] Deleting DynamoDB tables...")
+    for table_name in TASK_STORE_TABLE_NAMES:
+        try:
+            dynamodb_client.delete_table(TableName=table_name)
+            logger.info(f"  ✓ Deleted DynamoDB table: {table_name}")
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code not in ("ResourceNotFoundException", "ResourceNotFound"):
+                logger.warning(f"  Could not delete DynamoDB table {table_name}: {e}")
 
 
 def delete_schedule_infrastructure() -> None:
@@ -2438,6 +2461,7 @@ def main():
             logger.warning("Langgraph agent runtime uninstall failed or was skipped.")
 
         delete_ecs_resources()
+        delete_task_store_tables()
         delete_alb_resources()
         delete_ec2_instances()
         delete_nat_gateways()

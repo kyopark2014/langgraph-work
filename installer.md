@@ -22,7 +22,7 @@ CDK 스택과 동등한 AWS 인프라를 프로그래밍 방식으로 배포합�
 - **Web UI**: ECS Fargate (`application/` — FastAPI + 프론트엔드) — 사용자 입력·MCP/Skill 선택·결과 표시
 - **LangGraph Agent**: AgentCore Runtime (`runtime_agent/langgraph/installer.py`) — 추론·MCP·Skill 실행
 - MCP 서버는 Runtime 컨테이너 **내부 stdio subprocess**로 기동됩니다. (`runtime_mcp/` 별도 MCP Runtime은 이 저장소에서 사용하지 않습니다.)
-- **S3 Files**: AgentCore 세션 checkpoint·ECS `tasks.db` 영속화를 위해 S3 버킷을 NFS로 마운트
+- **S3 Files**: AgentCore 세션 checkpoint·ECS app-data(graph/settings) 영속화를 위해 S3 버킷을 NFS로 마운트
 
 ### 주요 특징
 - **완전 자동화**: 단일 스크립트로 ECS·RAG·네트워킹 인프라 배포
@@ -157,7 +157,7 @@ VPC 생성 직후 session FS와 app-data FS를 **멱등**으로 프로비저닝�
 | Client SGs | runtime SG ↔ session mount SG; ECS SG ↔ app-data mount SG (NFS 2049) |
 
 - **AgentCore**: `/mnt/workspace` → checkpoint / skills / artifacts
-- **ECS**: `/mnt/app-data` → `tasks.db` / graph / settings / litellm (`TASK_DB_MOUNT`)
+- **ECS**: `/mnt/app-data` → graph / settings / litellm (`TASK_DB_MOUNT`). 태스크·메시지는 DynamoDB (`{project}-tasks` / `-messages`)
 - 마이그레이션: 기존 `agentcore-sessions/`의 application-database·litellm·graph·settings → `app-data/`
 - Runtime SG를 Bedrock/AgentCore/Secrets VPC endpoint에 연결
 
