@@ -1622,6 +1622,103 @@ EventBridge Scheduler 기반 예약 실행(`my-schedule`)이 포함되어 있습
 python3 installer.py --schedule-only
 ```
 
+## MCP APP
+
+일반 MCP 도구는 텍스트·JSON만 반환합니다. [MCP Apps](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)(SEP-1865, 확장 식별자 `io.modelcontextprotocol/ui`)는 도구가 **인터랙티브 HTML UI**(차트, 폼, 대시보드, 에디터 등)를 돌려주게 하는 MCP의 **공식 확장**입니다. 호스트(Claude, ChatGPT, VS Code, 본 프로젝트 Web UI 등)는 이 UI를 대화 화면 안의 **샌드박스 iframe**에 렌더합니다.
+
+상세 스펙·Claude Interactive Connectors·보안 모델은 [agent-skills/mcp-apps.md](../agent-skills/mcp-apps.md)를 참고하세요.
+
+### 왜 필요한가
+
+- DB 결과·다이어그램·설정 폼처럼 **사람이 직접 조작해야 하는 화면**은 텍스트로 표현하기 어렵습니다.
+- MCP Apps를 쓰면 UI가 필터·편집·내보내기를 처리하고, 모델은 `ui/update-model-context` 또는 App-provided tools로 사용자 행동을 계속 인지합니다.
+- MCP-UI(커뮤니티)와 OpenAI Apps SDK를 **하나의 오픈 표준**으로 합친 것입니다. 지원 호스트: Claude, ChatGPT, VS Code, Goose 등.
+
+### 핵심 구성
+
+
+| 구성 요소 | 설명 |
+|-----------|------|
+| **UI Resources** | `ui://` URI로 미리 선언하는 HTML (`mimeType: text/html;profile=mcp-app`) |
+| **Tool–UI Linkage** | 도구 `_meta.ui.resourceUri`로 UI 리소스를 연결. `visibility`로 model/app 호출 범위 분리 |
+| **Bidirectional Communication** | iframe(View) ↔ Host가 `postMessage` 위 JSON-RPC 2.0으로 통신 |
+| **Security Model** | 샌드박스 iframe 필수, 선언 기반 CSP, 호스트가 통제하는 origin에서 HTML 서빙 |
+
+```
+User ─ 대화 ─► Host(Web UI / Claude) ─ tools/call ─► MCP Server
+                 │                                      │
+                 │◄──── resources/read(ui://...) ───────┘
+                 ▼
+        ┌───────────────────────┐
+        │ View (샌드박스 iframe)  │◄─ postMessage ─► Host
+        │ HTML/JS UI            │   tools/call · ui/message · update-model-context
+        └───────────────────────┘
+```
+
+**Lifecycle 요약**
+
+1. Discovery — `tools/list`(`_meta.ui`), `resources/list`(`ui://`)
+2. Embedding — `tools/call` + iframe 렌더 → `ui/initialize` / `initialized` → `tool-input` / `tool-result`
+3. Interactive — 사용자 조작 → View가 Host를 통해 서버 도구 호출 또는 모델 컨텍스트 갱신
+4. Teardown — `ui/resource-teardown` 후 iframe 제거
+
+호스트가 MCP Apps를 지원하지 않으면 같은 도구가 **일반 텍스트 결과**로 graceful degradation됩니다. UI가 있어도 `content`에는 의미 있는 텍스트를 반드시 포함해야 합니다.
+
+### 예제: Excalidraw
+
+[Excalidraw MCP App](https://github.com/excalidraw/excalidraw-mcp)은 MCP Apps의 대표 예제입니다. 모델이 손그림 스타일 다이어그램을 스트리밍으로 그리고, 사용자는 채팅 안에서 미리보기·전체 화면 편집·내보내기를 합니다.
+
+| 항목 | 내용 |
+|------|------|
+| 원격 엔드포인트 | `https://mcp.excalidraw.com/mcp` (공개 Streamable HTTP, 인증 없음) |
+| UI 리소스 | `ui://excalidraw/...` (`text/html;profile=mcp-app`) |
+| 모델용 도구 | `read_me`, `create_view` — 다이어그램 생성·설명 |
+| App 전용 도구 | `export_to_excalidraw`, `save_checkpoint`, `read_checkpoint` — iframe만 호출 (`visibility: ["app"]`) |
+| Display | `inline`(SVG 미리보기) ↔ `fullscreen`(Excalidraw 에디터) |
+
+**사용 흐름**
+
+1. Web UI에서 MCP로 **`excalidraw`** 를 선택합니다 (`application/mcp.list`).
+2. 예: *"Draw an architecture diagram: user → API → database"* / *"Excalidraw로 귀여운 고양이 그려줘"*
+3. Runtime이 `create_view` 등을 호출하면 도구 결과에 `mcpApp` 페이로드(`resourceUri`, `toolInput`/`toolResult`)가 붙습니다.
+4. Web UI의 [`McpAppFrame`](./application/web/src/components/McpAppFrame.tsx)이 `GET /api/mcp-apps/resource`로 `ui://` HTML을 읽고 샌드박스 iframe에 렌더합니다.
+5. inline에서는 스트리밍 SVG 미리보기, fullscreen에서는 편집·Export(→ `export_to_excalidraw`)·체크포인트 저장이 가능합니다.
+
+```mermaid
+sequenceDiagram
+    participant UI as Web UI
+    participant RT as AgentCore Runtime
+    participant EX as mcp.excalidraw.com
+    participant Frame as McpAppFrame iframe
+
+    UI->>RT: chat (mcp_servers: excalidraw)
+    RT->>EX: tools/call create_view
+    EX-->>RT: tool result + _meta.ui.resourceUri
+    RT-->>UI: SSE tool_result (mcpApp)
+    UI->>EX: GET /api/mcp-apps/resource → resources/read ui://excalidraw/...
+    UI->>Frame: sandbox iframe + tool-input / tool-result
+    Frame->>UI: tools/call save_checkpoint / export_to_excalidraw
+    UI->>EX: POST /api/mcp-apps/call-tool (proxy)
+```
+
+**이 프로젝트에서의 연동**
+
+| 계층 | 모듈 | 역할 |
+|------|------|------|
+| Runtime MCP 설정 | [`mcp_config.py`](./runtime_agent/langgraph/mcp_config.py) | `excalidraw` → `https://mcp.excalidraw.com/mcp` |
+| UI 매핑 캐시 | [`mcp_apps_host.py`](./runtime_agent/langgraph/mcp_apps_host.py) (Runtime) | 도구 `_meta.ui.resourceUri` → `mcpApp` 페이로드. Excalidraw는 HTML을 스트림에 넣지 않고 URI만 전달 (`HOST_FETCHED_SERVERS`) |
+| Host 프록시 | [`application/mcp_apps_host.py`](./application/mcp_apps_host.py), [`mcp_app_resources.py`](./application/mcp_app_resources.py), [`routes_mcp_apps.py`](./application/api/routes_mcp_apps.py) | `resources/read`·iframe `tools/call`을 Excalidraw 원격 MCP로 프록시. iframe 허용 도구: `export_to_excalidraw`, `save_checkpoint`, `read_checkpoint` |
+| 프론트 | [`McpAppFrame.tsx`](./application/web/src/components/McpAppFrame.tsx), [`mcpAppHost.ts`](./application/web/src/mcpAppHost.ts) | 샌드박스 iframe, display mode, host↔View JSON-RPC |
+
+> Plus workspace용 Excalidraw MCP와 OSS `mcp.excalidraw.com`은 엔드포인트가 다릅니다. 본 프로젝트는 **공개 OSS MCP Apps** 엔드포인트를 사용합니다.
+
+### 참고
+
+- 스펙: [SEP-1865 / MCP Apps](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)
+- SDK: [`@modelcontextprotocol/ext-apps`](https://github.com/modelcontextprotocol/ext-apps)
+- Excalidraw MCP: [excalidraw/excalidraw-mcp](https://github.com/excalidraw/excalidraw-mcp) · [mcp.excalidraw.com](https://mcp.excalidraw.com)
+- 내부 문서: [agent-skills/mcp-apps.md](../agent-skills/mcp-apps.md)
+
 ## 배포하기
 
 아래와 같이 EC2를 이용해 배포 환경을 구성합니다.
