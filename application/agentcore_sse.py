@@ -68,6 +68,7 @@ def tool_slot_update(
     *,
     mcp_server: str | None = None,
     skill_name: str | None = None,
+    mcp_app: dict | None = None,
 ):
     if notification_queue is not None:
         notification_queue.tool_update(
@@ -75,6 +76,7 @@ def tool_slot_update(
             message,
             mcp_server=mcp_server,
             skill_name=skill_name,
+            mcp_app=mcp_app,
         )
 
 
@@ -169,6 +171,7 @@ def _process_tool_events(data_json: dict, notification_queue, stream_state: dict
             f"Tool Result: {_truncate_text(tool_result, _NOTIFY_TRUNCATE_CHARS)}",
             mcp_server=data_json.get("mcpServer"),
             skill_name=data_json.get("skillName"),
+            mcp_app=data_json.get("mcpApp"),
         )
         _collect_tool_result_artifacts(tool_name, tool_result, references, image_url)
         return
@@ -197,7 +200,18 @@ def _process_tool_events(data_json: dict, notification_queue, stream_state: dict
             )
 
 
+def _handle_stream_ping(notification_queue) -> None:
+    # Long bash with no stdout still needs queue activity for idle timers
+    # and bytes on the wire for ALB idle timeout.
+    if notification_queue is not None and hasattr(notification_queue, "ping"):
+        notification_queue.ping()
+
+
 def _process_strands_sse_event(data_json: dict, notification_queue, stream_state: dict) -> None:
+    if data_json.get("ping"):
+        _handle_stream_ping(notification_queue)
+        return
+
     if "data" in data_json:
         text = normalize_bedrock_message_content(data_json["data"])
         logger.info("[data] %s", _truncate_text(text, _LOG_TRUNCATE_CHARS))
@@ -217,6 +231,10 @@ def _process_strands_sse_event(data_json: dict, notification_queue, stream_state
 
 
 def _process_langgraph_sse_event(data_json: dict, notification_queue, stream_state: dict) -> None:
+    if data_json.get("ping"):
+        _handle_stream_ping(notification_queue)
+        return
+
     if "data" in data_json:
         text = normalize_bedrock_message_content(data_json["data"])
         logger.info("[data] %s", _truncate_text(text, _LOG_TRUNCATE_CHARS))

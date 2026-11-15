@@ -111,6 +111,8 @@ class AgentCoreService:
 
         files=None,
         task_id=None,
+
+        notion_access_token=None,
     ) -> str:
         return json.dumps(
             {
@@ -128,6 +130,7 @@ class AgentCoreService:
                 "runtime_session_id": runtime_session_id,
                 "task_id": task_id or "",
                 "files": files or [],
+                "notion_access_token": notion_access_token or "",
             }
         )
 
@@ -197,6 +200,8 @@ class AgentCoreService:
 
         files=None,
         task_id=None,
+
+        notion_access_token=None,
     ):
         tool_info_list.clear()
         tool_result_list.clear()
@@ -221,12 +226,19 @@ class AgentCoreService:
 
             files=files,
             task_id=task_id,
+            notion_access_token=notion_access_token,
         )
 
         agent_runtime_arn = self.resolve_runtime_arn()
         print(f"agent_runtime_arn: {agent_runtime_arn}")
         logger.info("agent_runtime_arn: %s", agent_runtime_arn)
-        logger.info("Payload: %s", payload)
+        try:
+            payload_log = json.loads(payload)
+            if payload_log.get("notion_access_token"):
+                payload_log["notion_access_token"] = "***"
+            logger.info("Payload: %s", json.dumps(payload_log, ensure_ascii=False))
+        except Exception:
+            logger.info("Payload built (log masked)")
 
         if agent_runtime_arn is None:
             logger.error("agent_runtime_arn is not found")
@@ -296,7 +308,8 @@ def run_agent(
     memory_enabled=None,
 
     files=None,
-        task_id=None,
+    task_id=None,
+    notion_access_token=None,
 ):
     return AgentCoreService().run(
         prompt,
@@ -311,4 +324,5 @@ def run_agent(
 
         files=files,
         task_id=task_id,
+        notion_access_token=notion_access_token,
     )
